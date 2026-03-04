@@ -18,6 +18,7 @@ OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openai-codex/gpt-5.3-codex")
 OPENCLAW_TIMEOUT_SECONDS = float(os.getenv("OPENCLAW_TIMEOUT_SECONDS", "45"))
 OPENCLAW_SESSION_HEADER = os.getenv("OPENCLAW_SESSION_HEADER", "x-openclaw-session-key")
 OPENCLAW_SESSION_PREFIX = os.getenv("OPENCLAW_SESSION_PREFIX", "relay:")
+GATEWAY_TOKEN_PATH = os.getenv("OPENCLAW_GATEWAY_TOKEN_PATH", "/root/.openclaw/workspace/.openclaw_gateway_token.txt")
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -27,6 +28,17 @@ def normalize_prefix(prefix: str) -> str:
     if not p.startswith("/"):
         p = f"/{p}"
     return p.rstrip("/")
+
+
+def _resolve_openclaw_api_key() -> str:
+    # Priority: explicit env var, then local gateway token file.
+    if OPENCLAW_API_KEY:
+        return OPENCLAW_API_KEY.strip()
+    try:
+        with open(GATEWAY_TOKEN_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
 
 
 def _extract_text_from_chat_response(data: dict[str, Any]) -> str:
@@ -59,8 +71,9 @@ async def handle_task(message: str, worker_id: str, session_id: str) -> str:
     If local upstream is unavailable, raise an explicit error (no fallback).
     """
     headers = {"Content-Type": "application/json"}
-    if OPENCLAW_API_KEY:
-        headers["Authorization"] = f"Bearer {OPENCLAW_API_KEY}"
+    resolved_key = _resolve_openclaw_api_key()
+    if resolved_key:
+        headers["Authorization"] = f"Bearer {resolved_key}"
 
     # Keep per-chat continuity by mapping relay session_id -> upstream session key header.
     if session_id:
