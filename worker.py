@@ -3,11 +3,21 @@ import asyncio
 import json
 import os
 import random
+from typing import Any
 
+import httpx
 import websockets
 
 
 WORKER_TOKEN = os.getenv("WORKER_TOKEN", "worker-secret-token")
+
+# OpenClaw/OpenAI-compatible upstream settings
+OPENCLAW_CHAT_URL = os.getenv("OPENCLAW_CHAT_URL", "http://127.0.0.1:18789/v1/chat/completions")
+OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "")
+OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openai-codex/gpt-5.3-codex")
+OPENCLAW_TIMEOUT_SECONDS = float(os.getenv("OPENCLAW_TIMEOUT_SECONDS", "45"))
+OPENCLAW_SESSION_HEADER = os.getenv("OPENCLAW_SESSION_HEADER", "x-openclaw-session-key")
+OPENCLAW_SESSION_PREFIX = os.getenv("OPENCLAW_SESSION_PREFIX", "relay:")
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -19,10 +29,61 @@ def normalize_prefix(prefix: str) -> str:
     return p.rstrip("/")
 
 
-async def handle_task(message: str, worker_id: str) -> str:
-    # Simulated processing logic.
-    await asyncio.sleep(0.3)
-    return f"[{worker_id}] {message.upper()}"
+def _extract_text_from_chat_response(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    msg = (choices[0] or {}).get("message") or {}
+    content = msg.get("content")
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                txt = item.get("text")
+                if isinstance(txt, str):
+                    parts.append(txt)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(p for p in parts if p).strip()
+
+    return ""
+
+
+async def handle_task(message: str, worker_id: str, session_id: str) -> str:
+    """
+    Send the user message to OpenClaw/OpenAI-compatible chat API and return model reply.
+    Falls back to uppercase echo only if upstream call fails.
+    """
+    headers = {"Content-Type": "application/json"}
+    if OPENCLAW_API_KEY:
+        headers["Authorization"] = f"Bearer {OPENCLAW_API_KEY}"
+
+    # Keep per-chat continuity by mapping relay session_id -> upstream session key header.
+    if session_id:
+        headers[OPENCLAW_SESSION_HEADER] = f"{OPENCLAW_SESSION_PREFIX}{session_id}"
+
+    payload: dict[str, Any] = {
+        "model": OPENCLAW_MODEL,
+        "messages": [{"role": "user", "content": message}],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT_SECONDS) as client:
+            resp = await client.post(OPENCLAW_CHAT_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            text = _extract_text_from_chat_response(data)
+            if text:
+                return text
+            return "[empty model response]"
+    except Exception:
+        # Demo-safe fallback to keep relay pipeline alive during local testing.
+        await asyncio.sleep(0.1)
+        return f"[{worker_id}] {message.upper()}"
 
 
 async def run_worker(server_ws_url: str, worker_id: str, prefix: str = "/relay", unstable: bool = False) -> None:
@@ -42,13 +103,14 @@ async def run_worker(server_ws_url: str, worker_id: str, prefix: str = "/relay",
 
                     task_id = msg["task_id"]
                     content = msg["message"]
+                    session_id = msg.get("session_id", "")
 
                     # Optional instability hook to exercise retry/timeout behavior.
                     if unstable and random.random() < 0.2:
                         await asyncio.sleep(999)
 
                     try:
-                        result = await handle_task(content, worker_id)
+                        result = await handle_task(content, worker_id, session_id)
                         await ws.send(
                             json.dumps(
                                 {
