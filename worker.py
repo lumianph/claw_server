@@ -55,8 +55,8 @@ def _extract_text_from_chat_response(data: dict[str, Any]) -> str:
 
 async def handle_task(message: str, worker_id: str, session_id: str) -> str:
     """
-    Send the user message to OpenClaw/OpenAI-compatible chat API and return model reply.
-    Falls back to uppercase echo only if upstream call fails.
+    Send the user message to local OpenClaw/OpenAI-compatible chat API and return model reply.
+    If local upstream is unavailable, raise an explicit error (no fallback).
     """
     headers = {"Content-Type": "application/json"}
     if OPENCLAW_API_KEY:
@@ -80,10 +80,8 @@ async def handle_task(message: str, worker_id: str, session_id: str) -> str:
             if text:
                 return text
             return "[empty model response]"
-    except Exception:
-        # Demo-safe fallback to keep relay pipeline alive during local testing.
-        await asyncio.sleep(0.1)
-        return f"[{worker_id}] {message.upper()}"
+    except Exception as exc:
+        raise RuntimeError(f"local OpenClaw API unavailable: {exc}") from exc
 
 
 async def run_worker(server_ws_url: str, worker_id: str, prefix: str = "/relay", unstable: bool = False) -> None:
